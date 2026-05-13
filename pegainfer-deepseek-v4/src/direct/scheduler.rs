@@ -952,7 +952,10 @@ where
     F: FnOnce(&[DirectBatchDecodeEntry]) -> Result<Vec<Vec<f32>>>,
 {
     for (state, step) in states_and_steps.iter() {
-        ensure_step_matches_state(state, step)?;
+        if let Err(err) = ensure_step_matches_state(state, step) {
+            release_batch_states_from(kv_cache, states_and_steps, "batch step provenance error");
+            return Err(err);
+        }
     }
 
     let mut decode_indices = Vec::new();
@@ -1003,27 +1006,35 @@ where
     let rows = match decode_next_logits(&decode_entries) {
         Ok(rows) => rows,
         Err(err) => {
-            for idx in decode_indices {
-                let state = &mut states_and_steps[idx].0;
-                if let Err(release_err) = release_greedy_request_from(kv_cache, state) {
-                    warn!(
-                        "failed to release DeepSeek V4 KV cache after batch decode error: {release_err:#}"
-                    );
-                }
-            }
+            release_batch_states_from(kv_cache, states_and_steps, "batch decode error");
             return Err(err);
         }
     };
-    ensure!(
-        rows.len() == decode_indices.len(),
-        "DeepSeek V4 batch decode returned {} rows for {} requests",
-        rows.len(),
-        decode_indices.len()
-    );
+    if rows.len() != decode_indices.len() {
+        let err = anyhow::anyhow!(
+            "DeepSeek V4 batch decode returned {} rows for {} requests",
+            rows.len(),
+            decode_indices.len()
+        );
+        release_batch_states_from(kv_cache, states_and_steps, "batch decode row-count error");
+        return Err(err);
+    }
     for (idx, next_logits) in decode_indices.into_iter().zip(rows) {
         states_and_steps[idx].0.next_logits = Some(next_logits);
     }
     Ok(())
+}
+
+fn release_batch_states_from(
+    kv_cache: &mut DirectKvCacheManager,
+    states_and_steps: &mut [(&mut DeepSeekV4RequestState, DirectDecodeStep)],
+    context: &str,
+) {
+    for (state, _) in states_and_steps.iter_mut() {
+        if let Err(release_err) = release_greedy_request_from(kv_cache, state) {
+            warn!("failed to release DeepSeek V4 KV cache after {context}: {release_err:#}");
+        }
+    }
 }
 
 pub fn start_engine(model_path: &Path, options: EngineLoadOptions) -> Result<EngineHandle> {
@@ -1334,8 +1345,15 @@ fn handle_request_wave(generator: &mut DeepSeekV4DirectGenerator, requests: Vec<
             .zip(steps.into_iter())
             .filter_map(|(active_req, step)| step.map(|step| (&mut active_req.state, step)))
             .collect::<Vec<_>>();
-        if let Err(err) = generator.decode_greedy_batch_step_from_steps(&mut pairs) {
+        let batch_result = generator.decode_greedy_batch_step_from_steps(&mut pairs);
+        drop(pairs);
+        if let Err(err) = batch_result {
             for active_req in &mut active {
+                if let Err(release_err) = generator.release_greedy_request(&mut active_req.state) {
+                    warn!(
+                        "failed to release DeepSeek V4 KV cache after batch scheduler decode error: {release_err:#}"
+                    );
+                }
                 send_request_error(
                     &active_req.req,
                     active_req.prompt_len,
@@ -1614,6 +1632,71 @@ mod tests {
         manager.release(&slot0).unwrap();
         manager.release(&replacement).unwrap();
         assert_eq!(manager.snapshot().active_count(), 0);
+    }
+
+    #[test]
+    fn batch_row_count_error_releases_all_active_slots() {
+        let mut manager = DirectKvCacheManager::new(16);
+        manager.set_request_slots(2).unwrap();
+        let slot0 = manager.reserve_in_slot(1, 4, 4, Some(0)).unwrap();
+        let slot1 = manager.reserve_in_slot(2, 4, 4, Some(1)).unwrap();
+        manager.attach_prepared(&slot0).unwrap();
+        manager.attach_prepared(&slot1).unwrap();
+        let mut state0 = DeepSeekV4RequestState {
+            request_epoch: 1,
+            kv_cache: Some(slot0),
+            prompt_len: 4,
+            max_new_tokens: 4,
+            ignore_eos: true,
+            generated: Vec::new(),
+            next_logits: Some(vec![0.0, 1.0]),
+            finish_reason: None,
+        };
+        let mut state1 = DeepSeekV4RequestState {
+            request_epoch: 2,
+            kv_cache: Some(slot1),
+            prompt_len: 4,
+            max_new_tokens: 4,
+            ignore_eos: true,
+            generated: Vec::new(),
+            next_logits: Some(vec![1.0, 0.0]),
+            finish_reason: None,
+        };
+        let step0 = DirectDecodeStep {
+            request_epoch: 1,
+            generated_len_before: 0,
+            prompt_len: 4,
+            token: Some(1),
+            finish_reason: None,
+        };
+        let step1 = DirectDecodeStep {
+            request_epoch: 2,
+            generated_len_before: 0,
+            prompt_len: 4,
+            token: Some(0),
+            finish_reason: None,
+        };
+        let mut pairs = vec![(&mut state0, step0), (&mut state1, step1)];
+
+        let err = match advance_greedy_batch_steps_with_decode(&mut manager, &mut pairs, |_| {
+            Ok(vec![vec![0.0, 1.0]])
+        }) {
+            Ok(_) => panic!("synthetic row-count mismatch unexpectedly succeeded"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("returned 1 rows for 2 requests"));
+        assert_eq!(state0.generated(), &[1]);
+        assert_eq!(state1.generated(), &[0]);
+        assert!(state0.kv_cache_lease().is_none());
+        assert!(state1.kv_cache_lease().is_none());
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.active_count(), 0);
+        assert_eq!(snapshot.total_releases(), 2);
+
+        let next = manager.reserve_in_slot(3, 2, 2, Some(1)).unwrap();
+        manager.attach_prepared(&next).unwrap();
+        assert_eq!(manager.snapshot().active_count(), 1);
     }
 
     #[test]
