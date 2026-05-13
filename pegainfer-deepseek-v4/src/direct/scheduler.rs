@@ -459,25 +459,25 @@ impl DeepSeekV4DirectGenerator {
             max_new_tokens,
             Some(slot_id),
         )?;
-        self.kv_cache.attach_prepared(&kv_cache)?;
-        let next_logits = run_prefill_logits_and_seed_decode_cache(
-            &mut self.runtime,
-            self.config,
-            prompt_tokens,
-        )?;
-        if slot_id != 0 {
-            clone_direct_decode_cache_slot(&mut self.runtime, 0, slot_id)?;
-        }
-        Ok(DeepSeekV4RequestState {
+        start_greedy_request_from_reserved_slot(
+            &mut self.kv_cache,
+            kv_cache,
             request_epoch,
-            kv_cache: Some(kv_cache),
-            prompt_len: prompt_tokens.len(),
+            prompt_tokens.len(),
             max_new_tokens,
             ignore_eos,
-            generated: Vec::with_capacity(max_new_tokens),
-            next_logits: Some(next_logits),
-            finish_reason: None,
-        })
+            || {
+                let next_logits = run_prefill_logits_and_seed_decode_cache(
+                    &mut self.runtime,
+                    self.config,
+                    prompt_tokens,
+                )?;
+                if slot_id != 0 {
+                    clone_direct_decode_cache_slot(&mut self.runtime, 0, slot_id)?;
+                }
+                Ok(next_logits)
+            },
+        )
     }
 
     #[cfg(test)]
@@ -835,6 +835,51 @@ impl DirectKvCacheManager {
         }
         .into())
     }
+}
+
+fn start_greedy_request_from_reserved_slot<F>(
+    kv_cache_manager: &mut DirectKvCacheManager,
+    kv_cache: DirectKvCacheLease,
+    request_epoch: u64,
+    prompt_len: usize,
+    max_new_tokens: usize,
+    ignore_eos: bool,
+    seed_next_logits: F,
+) -> Result<DeepSeekV4RequestState>
+where
+    F: FnOnce() -> Result<Vec<f32>>,
+{
+    if let Err(err) = kv_cache_manager.attach_prepared(&kv_cache) {
+        if let Err(release_err) = kv_cache_manager.release(&kv_cache) {
+            warn!(
+                "failed to release DeepSeek V4 KV cache after slot cache attach error: {release_err:#}"
+            );
+        }
+        return Err(err);
+    }
+
+    let next_logits = match seed_next_logits() {
+        Ok(next_logits) => next_logits,
+        Err(err) => {
+            if let Err(release_err) = kv_cache_manager.release(&kv_cache) {
+                warn!(
+                    "failed to release DeepSeek V4 KV cache after slot request start error: {release_err:#}"
+                );
+            }
+            return Err(err);
+        }
+    };
+
+    Ok(DeepSeekV4RequestState {
+        request_epoch,
+        kv_cache: Some(kv_cache),
+        prompt_len,
+        max_new_tokens,
+        ignore_eos,
+        generated: Vec::with_capacity(max_new_tokens),
+        next_logits: Some(next_logits),
+        finish_reason: None,
+    })
 }
 
 fn release_greedy_request_from(
@@ -1533,6 +1578,42 @@ mod tests {
         let snapshot = manager.snapshot();
         assert_eq!(snapshot.active_count(), 0);
         assert_eq!(snapshot.total_releases(), 3);
+    }
+
+    #[test]
+    fn slot_start_error_releases_only_failed_slot() {
+        let mut manager = DirectKvCacheManager::new(16);
+        manager.set_request_slots(2).unwrap();
+        let slot0 = manager.reserve_in_slot(1, 4, 4, Some(0)).unwrap();
+        manager.attach_prepared(&slot0).unwrap();
+        let slot1 = manager.reserve_in_slot(2, 3, 3, Some(1)).unwrap();
+
+        let err = match start_greedy_request_from_reserved_slot(
+            &mut manager,
+            slot1,
+            2,
+            3,
+            3,
+            true,
+            || Err(anyhow::anyhow!("synthetic prefill failure")),
+        ) {
+            Ok(_) => panic!("synthetic slot start failure unexpectedly succeeded"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("synthetic prefill failure"));
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.active_count(), 1);
+        assert_eq!(snapshot.active().unwrap().request_epoch(), 1);
+        assert_eq!(snapshot.total_releases(), 1);
+
+        let replacement = manager.reserve_in_slot(3, 2, 2, Some(1)).unwrap();
+        assert_eq!(replacement.slot_id(), 1);
+        manager.attach_prepared(&replacement).unwrap();
+        assert_eq!(manager.snapshot().active_count(), 2);
+        manager.release(&slot0).unwrap();
+        manager.release(&replacement).unwrap();
+        assert_eq!(manager.snapshot().active_count(), 0);
     }
 
     #[test]
