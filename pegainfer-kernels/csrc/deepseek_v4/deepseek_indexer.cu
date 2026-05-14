@@ -54,6 +54,14 @@ extern "C" int deepseek_tilelang_fp4_quant_inplace_n128(
     int m,
     cudaStream_t stream);
 
+extern "C" cudaError_t deepseek_cutedsl_indexer_dots_bf16_cuda(
+    const __nv_bfloat16 *q,
+    const __nv_bfloat16 *kv,
+    float *dots,
+    int rows,
+    int compressed_len,
+    cudaStream_t stream);
+
 __global__ void deepseek_indexer_scores_prefill_kernel(
     const __nv_bfloat16 *__restrict__ q,
     const __nv_bfloat16 *__restrict__ kv,
@@ -133,6 +141,50 @@ __global__ void deepseek_indexer_scores_prefill_serial_kernel(
   }
 
   scores[token * compressed_len + compressed] = acc * score_scale;
+}
+
+__global__ void deepseek_indexer_scores_epilogue_kernel(
+    const float *__restrict__ dots,
+    const __nv_bfloat16 *__restrict__ weights,
+    float *__restrict__ scores,
+    int seq_len,
+    int local_heads,
+    int compressed_len,
+    float score_scale) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total = seq_len * compressed_len;
+  if (idx >= total) return;
+
+  int token = idx / compressed_len;
+  int compressed = idx - token * compressed_len;
+  float acc = 0.0f;
+  for (int head = 0; head < local_heads; ++head) {
+    int dot_idx = (token * local_heads + head) * compressed_len + compressed;
+    float dot = dots[dot_idx];
+    float weight = __bfloat162float(weights[token * local_heads + head]);
+    acc += fmaxf(dot, 0.0f) * weight;
+  }
+  scores[token * compressed_len + compressed] = acc * score_scale;
+}
+
+__global__ void deepseek_indexer_scores_decode_epilogue_kernel(
+    const float *__restrict__ dots,
+    const __nv_bfloat16 *__restrict__ weights,
+    float *__restrict__ scores,
+    int local_heads,
+    int compressed_len,
+    float score_scale) {
+  int compressed = blockIdx.x * blockDim.x + threadIdx.x;
+  if (compressed >= compressed_len) return;
+
+  float acc = 0.0f;
+  for (int head = 0; head < local_heads; ++head) {
+    int dot_idx = head * compressed_len + compressed;
+    float dot = dots[dot_idx];
+    float weight = __bfloat162float(weights[head]);
+    acc += fmaxf(dot, 0.0f) * weight;
+  }
+  scores[compressed] = acc * score_scale;
 }
 
 __global__ void deepseek_indexer_topk_prefill_kernel(
@@ -551,6 +603,10 @@ cudaError_t deepseek_indexer_scores_prefill_cuda(
     int compressed_len,
     float score_scale,
     cudaStream_t stream) {
+  if (seq_len <= 0 || local_heads <= 0 || head_dim <= 0 || compressed_len <= 0) {
+    return cudaErrorInvalidValue;
+  }
+
   constexpr int threads = 256;
   int total = seq_len * compressed_len;
   int blocks = (total + threads - 1) / threads;
@@ -585,9 +641,11 @@ cudaError_t deepseek_indexer_scores_decode_cuda(
     int compressed_len,
     float score_scale,
     cudaStream_t stream) {
-  if (local_heads <= 0 || head_dim <= 0 || compressed_len <= 0) {
+  if (q == nullptr || kv == nullptr || weights == nullptr || scores == nullptr ||
+      local_heads <= 0 || head_dim <= 0 || compressed_len <= 0) {
     return cudaErrorInvalidValue;
   }
+
   constexpr int threads = 256;
   int blocks = (compressed_len + threads - 1) / threads;
   deepseek_indexer_scores_decode_serial_kernel<<<blocks, threads, 0, stream>>>(
