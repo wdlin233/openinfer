@@ -733,8 +733,13 @@ cudaError_t deepseek_compressor_nonoverlap_prefill_cuda(
     return cudaErrorInvalidValue;
   }
   // ratio upper bound 16 matches the fused epilogue's per-thread route arrays.
+  // `seq_len` does NOT need to be a multiple of `ratio`: the GEMMs run over the
+  // full input, the epilogue reads only the first `compressed_len * ratio`
+  // tokens, and any trailing partial group is ignored (matches the pre-cuBLAS
+  // hand-rolled kernel's behavior). Required for online prompts whose prefill
+  // length is not aligned to `ratio` (e.g. ratio=2 with seq_len=21).
   if (ratio <= 1 || ratio > 16 || seq_len < ratio || hidden_dim <= 0 ||
-      head_dim <= 0 || (seq_len % ratio) != 0) {
+      head_dim <= 0) {
     return cudaErrorInvalidValue;
   }
   const int compressed_len = seq_len / ratio;
