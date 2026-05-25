@@ -137,8 +137,9 @@ pub(crate) struct PromptLen1MoeScratch {
 }
 
 impl PromptLen1MoeScratch {
-    pub(crate) fn new(ctx: &DeviceContext) -> Result<Self> {
-        let route_workspace = KimiMarlinRouteWorkspace::new(ctx, 1, PROMPT_LEN1_MARLIN_BLOCK_SIZE)?;
+    pub(crate) fn new(ctx: &DeviceContext, batch_size: usize) -> Result<Self> {
+        let route_workspace =
+            KimiMarlinRouteWorkspace::new(ctx, batch_size, PROMPT_LEN1_MARLIN_BLOCK_SIZE)?;
         let marlin_workspace = KimiMarlinWna16Workspace::new(
             ctx,
             route_workspace.max_m_blocks,

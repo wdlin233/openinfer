@@ -106,4 +106,38 @@ int gemm_graphsafe_cuda(const __nv_bfloat16 *W, const __nv_bfloat16 *X, __nv_bfl
   return static_cast<int>(cudaPeekAtLastError());
 }
 
+// Batched per-token GEMM: each row is computed as the same N=1 GEMM used by
+// the decode path. This preserves row-wise numerical parity with the serial
+// prompt_len=1 path while keeping a batch-shaped Rust API.
+int gemm_per_token_cuda(const __nv_bfloat16 *W, const __nv_bfloat16 *X,
+                                 __nv_bfloat16 *Y, int M, int batch, int K,
+                                 cudaStream_t stream) {
+  if (g_cublas_handle == nullptr) {
+    return static_cast<int>(cudaErrorInvalidResourceHandle);
+  }
+  if (M <= 0 || batch <= 0 || K <= 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const float h_alpha = 1.0f;
+  const float h_beta = 0.0f;
+  cublasStatus_t status = cublasSetStream(g_cublas_handle, stream);
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    return cublas_status_to_error(status);
+  }
+  for (int row = 0; row < batch; ++row) {
+    status = cublasGemmEx(g_cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                          M, 1, K,
+                          &h_alpha,
+                          W, CUDA_R_16BF, K,
+                          X + static_cast<int64_t>(row) * K, CUDA_R_16BF, K,
+                          &h_beta,
+                          Y + static_cast<int64_t>(row) * M, CUDA_R_16BF, M,
+                          CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      return cublas_status_to_error(status);
+    }
+  }
+  return static_cast<int>(cudaPeekAtLastError());
+}
+
 } // extern "C"

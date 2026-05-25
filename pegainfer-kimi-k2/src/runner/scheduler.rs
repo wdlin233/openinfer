@@ -29,9 +29,9 @@ use crate::{
 };
 
 const KIMI_RUNNER_MAX_BATCH: usize = 64;
-// Batched prompt_len=1 prefill is only enabled for a single active row until
-// seq_len>1 parity is proven against the TP8 NCCL trace.
-const KIMI_PROMPT_LEN1_PREFILL_MICROBATCH: usize = 1;
+// Row-wise prompt_len=1 prefill is exact at microbatch=2; larger batches still
+// drift against the TP8 NCCL trace and must stay behind further parity work.
+const KIMI_PROMPT_LEN1_PREFILL_MICROBATCH: usize = 2;
 const KIMI_PREFILL_BATCH_COALESCE: Duration = Duration::from_millis(100);
 const KIMI_PREFILL_BATCH_POLL: Duration = Duration::from_micros(50);
 

@@ -427,7 +427,7 @@ impl KimiWorkerDecodeScratch {
             marlin: crate::typed_scratch::MarlinExpertScratch::new(ctx, batch_size)?,
             marlin_route_workspace,
             marlin_workspace,
-            prompt_len1_moe: crate::typed_scratch::PromptLen1MoeScratch::new(ctx)?,
+            prompt_len1_moe: crate::typed_scratch::PromptLen1MoeScratch::new(ctx, batch_size)?,
             comm: crate::typed_scratch::CommScratch::new(ctx, batch_size)?,
             sampling: crate::typed_scratch::SamplingScratch::new(ctx, batch_size)?,
         })

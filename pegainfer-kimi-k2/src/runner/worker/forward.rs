@@ -1,5 +1,30 @@
 use super::{runtime::*, *};
 
+pub(super) fn all_reduce_bf16_rows_in_place(
+    values: &mut CudaSlice<half::bf16>,
+    rows: usize,
+    row_len: usize,
+    comm: &Comm,
+) -> Result<()> {
+    ensure!(
+        values.len() >= rows * row_len,
+        "Kimi row-wise bf16 all-reduce len {} < rows {} * row_len {}",
+        values.len(),
+        rows,
+        row_len
+    );
+    for row in 0..rows {
+        let start = row * row_len;
+        let end = start + row_len;
+        let mut view = values.slice_mut(start..end);
+        comm.all_reduce_in_place(&mut view, &ReduceOp::Sum)
+            .map_err(|err| {
+                anyhow::anyhow!("Kimi row-wise bf16 all-reduce failed: status={:?}", err.0)
+            })?;
+    }
+    Ok(())
+}
+
 pub(super) fn forward_decode_batch_next_token_kernels(
     device_ctx: &DeviceContext,
     decode_aux_ctx: &DeviceContext,
@@ -300,7 +325,7 @@ pub(super) fn forward_mla_prompt_len1_batch_layer_into(
         KIMI_K2_RMS_NORM_EPS,
         &mut scratch.mla.normed,
     )?;
-    typed_ops::gemm_into(
+    typed_ops::gemm_per_token_into(
         ctx,
         &attention.fused_qkv_a_proj,
         &scratch.mla.normed,
@@ -341,7 +366,7 @@ pub(super) fn forward_mla_prompt_len1_batch_layer_into(
         batch_indices_d,
         positions_d,
     )?;
-    typed_ops::gemm_dm_typed_to_hs(
+    typed_ops::gemm_dm_typed_to_hs_per_token(
         ctx,
         &attention.kv_b_proj,
         &scratch.mla.compressed_normed,
@@ -353,19 +378,19 @@ pub(super) fn forward_mla_prompt_len1_batch_layer_into(
         &mut scratch.mla.attn_out,
         local_heads,
     )?;
-    typed_ops::gemm_dm_hs_to_typed(
+    typed_ops::gemm_dm_hs_to_typed_per_token(
         ctx,
         &attention.o_proj,
         &scratch.mla.attn_out,
         &mut scratch.mla.projected,
     )?;
     if let Some(comm) = comm {
-        let active_elems = scratch.mla.projected.seq_len * KIMI_K2_HIDDEN;
-        let mut projected_view = scratch.mla.projected.data.slice_mut(0..active_elems);
-        comm.all_reduce_in_place(&mut projected_view, &ReduceOp::Sum)
-            .map_err(|err| {
-                anyhow::anyhow!("Kimi TP all-reduce bf16 hidden failed: status={:?}", err.0)
-            })?;
+        all_reduce_bf16_rows_in_place(
+            &mut scratch.mla.projected.data,
+            scratch.mla.projected.seq_len,
+            KIMI_K2_HIDDEN,
+            comm,
+        )?;
     }
     typed_ops::add_into(
         ctx,
@@ -426,7 +451,7 @@ pub(super) fn forward_dense_mlp_prefill_scratch_into(
         KIMI_K2_RMS_NORM_EPS,
         &mut scratch.mla.normed,
     )?;
-    typed_ops::gemm_dm_typed_to_hs(
+    typed_ops::gemm_dm_typed_to_hs_per_token(
         ctx,
         &dense.gate_up_proj,
         &scratch.mla.normed,
@@ -437,19 +462,19 @@ pub(super) fn forward_dense_mlp_prefill_scratch_into(
         &scratch.dense_mlp.gate_up,
         &mut scratch.dense_mlp.activated,
     )?;
-    typed_ops::gemm_dm_hs_to_typed(
+    typed_ops::gemm_dm_hs_to_typed_per_token(
         ctx,
         &dense.down_proj,
         &scratch.dense_mlp.activated,
         &mut scratch.mla.projected,
     )?;
     if let Some(comm) = comm {
-        let active_elems = seq_len * KIMI_K2_HIDDEN;
-        let mut projected_view = scratch.mla.projected.data.slice_mut(0..active_elems);
-        comm.all_reduce_in_place(&mut projected_view, &ReduceOp::Sum)
-            .map_err(|err| {
-                anyhow::anyhow!("Kimi TP all-reduce bf16 hidden failed: status={:?}", err.0)
-            })?;
+        all_reduce_bf16_rows_in_place(
+            &mut scratch.mla.projected.data,
+            seq_len,
+            KIMI_K2_HIDDEN,
+            comm,
+        )?;
     }
     typed_ops::add_into(
         ctx,
@@ -648,10 +673,6 @@ pub(super) fn forward_moe_layer_prefill_scratch_into(
     scratch: &mut KimiWorkerDecodeScratch,
 ) -> Result<()> {
     let seq_len = scratch.mla.hidden.seq_len;
-    ensure!(
-        seq_len == 1,
-        "Kimi prompt_len1 scratch MoE supports one active row, got {seq_len}"
-    );
     typed_ops::rms_norm_into(
         ctx,
         &scratch.mla.hidden,
@@ -659,7 +680,7 @@ pub(super) fn forward_moe_layer_prefill_scratch_into(
         KIMI_K2_RMS_NORM_EPS,
         &mut scratch.mla.normed,
     )?;
-    typed_ops::gemm_dm_typed_to_hs(
+    typed_ops::gemm_dm_typed_to_hs_per_token(
         ctx,
         &moe.shared_gate_up_proj,
         &scratch.mla.normed,
@@ -670,19 +691,19 @@ pub(super) fn forward_moe_layer_prefill_scratch_into(
         &scratch.shared_expert.gate_up,
         &mut scratch.shared_expert.activated,
     )?;
-    typed_ops::gemm_dm_hs_to_typed(
+    typed_ops::gemm_dm_hs_to_typed_per_token(
         ctx,
         &moe.shared_down_proj,
         &scratch.shared_expert.activated,
         &mut scratch.mla.projected,
     )?;
     if let Some(comm) = comm {
-        let active_elems = seq_len * KIMI_K2_HIDDEN;
-        let mut shared_view = scratch.mla.projected.data.slice_mut(0..active_elems);
-        comm.all_reduce_in_place(&mut shared_view, &ReduceOp::Sum)
-            .map_err(|err| {
-                anyhow::anyhow!("Kimi TP all-reduce bf16 hidden failed: status={:?}", err.0)
-            })?;
+        all_reduce_bf16_rows_in_place(
+            &mut scratch.mla.projected.data,
+            seq_len,
+            KIMI_K2_HIDDEN,
+            comm,
+        )?;
     }
 
     {
@@ -695,14 +716,15 @@ pub(super) fn forward_moe_layer_prefill_scratch_into(
             topk_weight: &mut scratch.router.router_topk_weight.data,
             topk_idx: &mut scratch.router.router_topk_idx.data,
         };
-        kimi_router_noaux_tc_launch(
+        let router_batch = KimiRouterBatch {
+            batch_size: seq_len,
+            active_tokens: seq_len,
+            padded_tokens: seq_len,
+        };
+        kimi_router_noaux_tc_per_token_launch(
             ctx,
             KimiRouterConfig::kimi_k2(),
-            KimiRouterBatch {
-                batch_size: seq_len,
-                active_tokens: seq_len,
-                padded_tokens: seq_len,
-            },
+            router_batch,
             &scratch.mla.normed,
             &moe.router.gate_weight,
             &moe.router.e_score_correction_bias,
@@ -780,7 +802,7 @@ pub(super) fn forward_moe_layer_prefill_scratch_into(
     let nccl_comm = comm.ok_or_else(|| {
         anyhow::anyhow!("NCCL MoE batch routed path requires TP comm (use PPLX for TP1)")
     })?;
-    all_reduce_f32_bulk_in_place(
+    all_reduce_f32_rows_in_place(
         &mut scratch.comm.routed_out_f32,
         seq_len,
         KIMI_K2_HIDDEN,

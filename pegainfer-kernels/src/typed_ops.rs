@@ -67,6 +67,33 @@ pub fn gemm_graphsafe_into<const OUT: usize, const IN: usize>(
     )
 }
 
+/// `Y[row] = W @ X[row]` for each row, preserving the decode GEMM boundary.
+pub fn gemm_per_token_into<const OUT: usize, const IN: usize>(
+    ctx: &DeviceContext,
+    w: &GpuWeight<OUT, IN>,
+    x: &GpuTensor<IN>,
+    y: &mut GpuTensor<OUT>,
+) -> Result<()> {
+    anyhow::ensure!(
+        y.seq_len == x.seq_len,
+        "typed per-token GEMM seq_len mismatch: input={}, output={}",
+        x.seq_len,
+        y.seq_len
+    );
+    let (w_ptr, _gw) = w.data.device_ptr(&ctx.stream);
+    let (x_ptr, _gx) = x.data.device_ptr(&ctx.stream);
+    let (y_ptr, _gy) = y.data.device_ptr_mut(&ctx.stream);
+    launch_gemm_per_token(
+        w_ptr as *const ffi::Half,
+        x_ptr as *const ffi::Half,
+        y_ptr as *mut ffi::Half,
+        OUT,
+        x.seq_len,
+        IN,
+        ctx,
+    )
+}
+
 // ── RMSNorm ──────────────────────────────────────────────────────────
 
 /// Batched RMSNorm: `out[i] = rms_norm(x[i], w)`. Same DIM enforced at compile time.
@@ -448,6 +475,31 @@ pub fn gemm_dm_typed_to_hs<const IN: usize>(
     )
 }
 
+/// `Y[row] = W @ X[row]` for runtime-dim output, preserving the decode GEMM boundary.
+pub fn gemm_dm_typed_to_hs_per_token<const IN: usize>(
+    ctx: &DeviceContext,
+    w: &DeviceMatrix,
+    x: &GpuTensor<IN>,
+    y: &mut HiddenStates,
+) -> Result<()> {
+    anyhow::ensure!(
+        w.cols == IN && y.hidden_dim == w.rows && y.seq_len == x.seq_len,
+        "DM→HS per-token GEMM shape mismatch"
+    );
+    let (w_ptr, _gw) = w.data.device_ptr(&ctx.stream);
+    let (x_ptr, _gx) = x.data.device_ptr(&ctx.stream);
+    let (y_ptr, _gy) = y.data.device_ptr_mut(&ctx.stream);
+    launch_gemm_per_token(
+        w_ptr as *const ffi::Half,
+        x_ptr as *const ffi::Half,
+        y_ptr as *mut ffi::Half,
+        w.rows,
+        x.seq_len,
+        IN,
+        ctx,
+    )
+}
+
 /// `Y = W @ X` — DeviceMatrix weight, runtime-dim input, typed output (prefill cuBLAS).
 pub fn gemm_dm_hs_to_typed<const OUT: usize>(
     ctx: &DeviceContext,
@@ -470,6 +522,31 @@ pub fn gemm_dm_hs_to_typed<const OUT: usize>(
         x.seq_len,
         x.hidden_dim,
         x.seq_len == 1,
+        ctx,
+    )
+}
+
+/// `Y[row] = W @ X[row]` for runtime-dim input, preserving the decode GEMM boundary.
+pub fn gemm_dm_hs_to_typed_per_token<const OUT: usize>(
+    ctx: &DeviceContext,
+    w: &DeviceMatrix,
+    x: &HiddenStates,
+    y: &mut GpuTensor<OUT>,
+) -> Result<()> {
+    anyhow::ensure!(
+        w.rows == OUT && w.cols == x.hidden_dim && y.seq_len == x.seq_len,
+        "HS→typed per-token GEMM shape mismatch"
+    );
+    let (w_ptr, _gw) = w.data.device_ptr(&ctx.stream);
+    let (x_ptr, _gx) = x.data.device_ptr(&ctx.stream);
+    let (y_ptr, _gy) = y.data.device_ptr_mut(&ctx.stream);
+    launch_gemm_per_token(
+        w_ptr as *const ffi::Half,
+        x_ptr as *const ffi::Half,
+        y_ptr as *mut ffi::Half,
+        OUT,
+        x.seq_len,
+        x.hidden_dim,
         ctx,
     )
 }
@@ -556,6 +633,40 @@ fn launch_gemm(
     Ok(())
 }
 
+fn launch_gemm_per_token(
+    w_ptr: *const ffi::Half,
+    x_ptr: *const ffi::Half,
+    y_ptr: *mut ffi::Half,
+    m: usize,
+    batch: usize,
+    k: usize,
+    ctx: &DeviceContext,
+) -> Result<()> {
+    unsafe {
+        let status = ffi::gemm_per_token_cuda(
+            w_ptr,
+            x_ptr,
+            y_ptr,
+            m as i32,
+            batch as i32,
+            k as i32,
+            ctx.stream.cu_stream(),
+        );
+        if status != 0 {
+            if status >= 100_000 {
+                anyhow::bail!(
+                    "cuBLAS per-token GEMM failed: cublas_status={}, m={m}, batch={batch}, k={k}",
+                    status - 100_000
+                );
+            }
+            anyhow::bail!(
+                "CUDA per-token GEMM launch failed: cuda_status={status}, m={m}, batch={batch}, k={k}"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn gemm_runtime_out_impl<const IN: usize>(
     ctx: &DeviceContext,
     w: &GpuTensor<IN>,
@@ -586,6 +697,38 @@ fn gemm_runtime_out_impl<const IN: usize>(
         x.seq_len,
         IN,
         graphsafe || x.seq_len == 1,
+        ctx,
+    )
+}
+
+pub fn gemm_runtime_out_per_token_into<const IN: usize>(
+    ctx: &DeviceContext,
+    w: &GpuTensor<IN>,
+    x: &GpuTensor<IN>,
+    y: &mut HiddenStates,
+) -> Result<()> {
+    anyhow::ensure!(
+        y.hidden_dim == w.seq_len,
+        "runtime-out per-token GEMM output hidden mismatch: weight rows={}, output hidden={}",
+        w.seq_len,
+        y.hidden_dim
+    );
+    anyhow::ensure!(
+        y.seq_len == x.seq_len,
+        "runtime-out per-token GEMM seq_len mismatch: input={}, output={}",
+        x.seq_len,
+        y.seq_len
+    );
+    let (w_ptr, _gw) = w.data.device_ptr(&ctx.stream);
+    let (x_ptr, _gx) = x.data.device_ptr(&ctx.stream);
+    let (y_ptr, _gy) = y.data.device_ptr_mut(&ctx.stream);
+    launch_gemm_per_token(
+        w_ptr as *const ffi::Half,
+        x_ptr as *const ffi::Half,
+        y_ptr as *mut ffi::Half,
+        w.seq_len,
+        x.seq_len,
+        IN,
         ctx,
     )
 }

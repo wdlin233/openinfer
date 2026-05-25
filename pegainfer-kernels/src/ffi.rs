@@ -192,6 +192,16 @@ unsafe extern "C" {
         K: i32,
         stream: CUstream,
     ) -> i32;
+
+    pub fn gemm_per_token_cuda(
+        W: *const Half,
+        X: *const Half,
+        Y: *mut Half,
+        M: i32,
+        batch: i32,
+        K: i32,
+        stream: CUstream,
+    ) -> i32;
 }
 
 #[cfg(feature = "kimi-k2")]
@@ -752,6 +762,24 @@ unsafe extern "C" {
 #[cfg(feature = "kimi-k2")]
 unsafe extern "C" {
     pub fn kimi_k2_router_noaux_tc_cuda(
+        hidden: *const Half,
+        gate_weight: *const Half,
+        e_score_correction_bias: *const f32,
+        logits: *mut f32,
+        scores: *mut f32,
+        choice_scores: *mut f32,
+        topk_weight: *mut f32,
+        topk_idx: *mut i32,
+        active_tokens: i32,
+        padded_tokens: i32,
+        hidden_dim: i32,
+        n_experts: i32,
+        topk: i32,
+        route_scale: f32,
+        stream: CUstream,
+    ) -> CUresult;
+
+    pub fn kimi_k2_router_noaux_tc_per_token_cuda(
         hidden: *const Half,
         gate_weight: *const Half,
         e_score_correction_bias: *const f32,

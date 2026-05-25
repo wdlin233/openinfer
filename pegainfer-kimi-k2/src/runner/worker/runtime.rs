@@ -50,6 +50,31 @@ pub(super) fn all_reduce_f32_bulk_in_place(
         .map_err(|err| anyhow::anyhow!("Kimi bulk f32 all-reduce failed: status={:?}", err.0))
 }
 
+pub(super) fn all_reduce_f32_rows_in_place(
+    values: &mut CudaSlice<f32>,
+    rows: usize,
+    row_len: usize,
+    comm: &Comm,
+) -> Result<()> {
+    ensure!(
+        values.len() >= rows * row_len,
+        "Kimi row-wise f32 all-reduce len {} < rows {} * row_len {}",
+        values.len(),
+        rows,
+        row_len
+    );
+    for row in 0..rows {
+        let start = row * row_len;
+        let end = start + row_len;
+        let mut view = values.slice_mut(start..end);
+        comm.all_reduce_in_place(&mut view, &ReduceOp::Sum)
+            .map_err(|err| {
+                anyhow::anyhow!("Kimi row-wise f32 all-reduce failed: status={:?}", err.0)
+            })?;
+    }
+    Ok(())
+}
+
 pub(super) fn reduce_scatter_f32_hidden_into(
     global: &CudaSlice<f32>,
     global_rows: usize,

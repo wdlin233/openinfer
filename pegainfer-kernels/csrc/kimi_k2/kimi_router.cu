@@ -141,6 +141,45 @@ CUresult kimi_router_logits_gemm(
   return status == CUBLAS_STATUS_SUCCESS ? CUDA_SUCCESS : CUDA_ERROR_LAUNCH_FAILED;
 }
 
+CUresult kimi_router_logits_gemm_per_token(
+    const __nv_bfloat16 *hidden,
+    const __nv_bfloat16 *gate_weight,
+    float *logits,
+    int padded_tokens,
+    int hidden_dim,
+    int n_experts,
+    cudaStream_t stream) {
+  if (g_cublas_handle == nullptr) return CUDA_ERROR_NOT_INITIALIZED;
+  const float alpha = 1.0f;
+  const float beta = 0.0f;
+  cublasStatus_t status = cublasSetStream(g_cublas_handle, stream);
+  if (status != CUBLAS_STATUS_SUCCESS) return CUDA_ERROR_INVALID_HANDLE;
+  for (int row = 0; row < padded_tokens; ++row) {
+    status = cublasGemmEx(
+        g_cublas_handle,
+        CUBLAS_OP_T,
+        CUBLAS_OP_N,
+        n_experts,
+        1,
+        hidden_dim,
+        &alpha,
+        gate_weight,
+        CUDA_R_16BF,
+        hidden_dim,
+        hidden + static_cast<int64_t>(row) * hidden_dim,
+        CUDA_R_16BF,
+        hidden_dim,
+        &beta,
+        logits + static_cast<int64_t>(row) * n_experts,
+        CUDA_R_32F,
+        n_experts,
+        CUBLAS_COMPUTE_32F_PEDANTIC,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    if (status != CUBLAS_STATUS_SUCCESS) return CUDA_ERROR_LAUNCH_FAILED;
+  }
+  return CUDA_SUCCESS;
+}
+
 }  // namespace
 
 extern "C" {
@@ -174,6 +213,55 @@ CUresult kimi_k2_router_noaux_tc_cuda(
   }
 
   CUresult result = kimi_router_logits_gemm(
+      hidden, gate_weight, logits, padded_tokens, hidden_dim, n_experts, stream);
+  if (result != CUDA_SUCCESS) return result;
+
+  int total_scores = padded_tokens * n_experts;
+  int blocks = (total_scores + kRouterThreads - 1) / kRouterThreads;
+  router_scores_kernel<<<blocks, kRouterThreads, 0, stream>>>(
+      logits, e_score_correction_bias, scores, choice_scores, total_scores, n_experts);
+  result = consume_last_cuda_error();
+  if (result != CUDA_SUCCESS) return result;
+
+  size_t select_smem =
+      static_cast<size_t>(kRouterSelectThreads) * (sizeof(float) + sizeof(int)) +
+      static_cast<size_t>(topk) * sizeof(float);
+  router_topk_normalize_kernel<<<active_tokens, kRouterSelectThreads, select_smem, stream>>>(
+      scores, choice_scores, topk_weight, topk_idx, active_tokens, n_experts, topk, route_scale);
+  result = consume_last_cuda_error();
+  if (result != CUDA_SUCCESS) return result;
+
+  return CUDA_SUCCESS;
+}
+
+CUresult kimi_k2_router_noaux_tc_per_token_cuda(
+    const __nv_bfloat16 *hidden,
+    const __nv_bfloat16 *gate_weight,
+    const float *e_score_correction_bias,
+    float *logits,
+    float *scores,
+    float *choice_scores,
+    float *topk_weight,
+    int *topk_idx,
+    int active_tokens,
+    int padded_tokens,
+    int hidden_dim,
+    int n_experts,
+    int topk,
+    float route_scale,
+    cudaStream_t stream) {
+  if (hidden == nullptr || gate_weight == nullptr || e_score_correction_bias == nullptr ||
+      logits == nullptr || scores == nullptr || choice_scores == nullptr ||
+      topk_weight == nullptr || topk_idx == nullptr) {
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+  if (active_tokens <= 0 || padded_tokens <= 0 || active_tokens > padded_tokens ||
+      hidden_dim <= 0 || n_experts <= 0 || topk <= 0 || topk > n_experts ||
+      n_experts != kKimiExperts || topk != kKimiTopk || !(route_scale > 0.0f)) {
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+
+  CUresult result = kimi_router_logits_gemm_per_token(
       hidden, gate_weight, logits, padded_tokens, hidden_dim, n_experts, stream);
   if (result != CUDA_SUCCESS) return result;
 

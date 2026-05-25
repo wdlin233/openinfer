@@ -349,17 +349,12 @@ impl KimiRankThreadState {
                 device_ctx.sync().with_context(|| {
                     format!("Kimi rank {} sync before prompt_len1 TP all-reduce", rank)
                 })?;
-                let active_elems = active_len * KIMI_K2_HIDDEN;
-                let mut hidden_view = decode_arena
-                    .scratch
-                    .mla
-                    .hidden
-                    .data
-                    .slice_mut(0..active_elems);
-                comm.all_reduce_in_place(&mut hidden_view, &ReduceOp::Sum)
-                    .map_err(|err| {
-                        anyhow::anyhow!("Kimi TP all-reduce bf16 hidden failed: status={:?}", err.0)
-                    })?;
+                all_reduce_bf16_rows_in_place(
+                    &mut decode_arena.scratch.mla.hidden.data,
+                    active_len,
+                    KIMI_K2_HIDDEN,
+                    comm,
+                )?;
             }
 
             let local_heads = self.local_dims.local_heads;
@@ -410,7 +405,7 @@ impl KimiRankThreadState {
                 KIMI_K2_RMS_NORM_EPS,
                 &mut decode_arena.scratch.mla.normed,
             )?;
-            typed_ops::gemm_runtime_out_into(
+            typed_ops::gemm_runtime_out_per_token_into(
                 &device_ctx,
                 &cache.lm_head,
                 &decode_arena.scratch.mla.normed,

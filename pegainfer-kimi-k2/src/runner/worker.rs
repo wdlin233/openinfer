@@ -28,8 +28,8 @@ use pegainfer_kernels::{
         kimi_mla_absorb_q_nope_rt, kimi_mla_extract_prefill_v_rt, kimi_mla_paged_kv_append,
         kimi_mla_rope_apply_kpe, kimi_mla_rope_assemble_prefill_rt, kimi_mla_rope_split_decode_rt,
         kimi_mla_split_qkv_a, kimi_mla_v_up_rt, kimi_moe_marlin_align_block_size,
-        kimi_router_noaux_tc_launch, kimi_scaled_add_f32_bf16_to_bf16,
-        repeat_f32_for_reduce_scatter_into, scale_f32_in_place,
+        kimi_router_noaux_tc_launch, kimi_router_noaux_tc_per_token_launch,
+        kimi_scaled_add_f32_bf16_to_bf16, repeat_f32_for_reduce_scatter_into, scale_f32_in_place,
     },
     tensor::{
         DeviceContext, DeviceMatrix, DeviceVec, GpuTensor, GpuWeight, HiddenStates, NormWeight,
