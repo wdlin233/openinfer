@@ -82,6 +82,11 @@ pub fn argmax_batch_bf16_into(
     Ok(())
 }
 
+pub fn argmax_batch_bf16_split_partials_len(rows: usize, vocab: usize) -> usize {
+    const TILE_ELEMS: usize = 4096;
+    rows * vocab.div_ceil(TILE_ELEMS)
+}
+
 /// GPU sampling: temperature → softmax → top-k → top-p → multinomial.
 /// Allocates a temporary output buffer — use `gpu_sample_into` for the decode loop.
 pub fn gpu_sample(

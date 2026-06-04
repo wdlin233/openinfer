@@ -152,6 +152,17 @@ unsafe extern "C" {
         stream: CUstream,
     );
 
+    pub fn argmax_batch_bf16_split_cuda(
+        x: *const Half,
+        values: *mut Half,
+        indices: *mut i32,
+        partial_values: *mut f32,
+        partial_indices: *mut i32,
+        rows: i32,
+        n: i32,
+        stream: CUstream,
+    );
+
     pub fn flashinfer_top1_cuda(
         logits: *const Half,
         top1_value_scratch: *mut Half,
@@ -217,6 +228,38 @@ unsafe extern "C" {
 
 #[cfg(feature = "kimi-k2")]
 unsafe extern "C" {
+    pub fn kimi_shared_gate_up_cublaslt_init_cuda() -> i32;
+
+    pub fn kimi_shared_gate_up_cublaslt_destroy_cuda();
+
+    pub fn kimi_shared_gate_up_cublaslt_cuda(
+        W: *const Half,
+        X: *const Half,
+        Y: *mut Half,
+        M: i32,
+        N: i32,
+        K: i32,
+        stream: CUstream,
+    ) -> i32;
+
+    pub fn kimi_o_proj_cublaslt_init_cuda() -> i32;
+
+    pub fn kimi_o_proj_cublaslt_destroy_cuda();
+
+    pub fn kimi_o_proj_cublaslt_cuda(
+        W: *const Half,
+        X: *const Half,
+        Y: *mut Half,
+        M: i32,
+        N: i32,
+        K: i32,
+        stream: CUstream,
+    ) -> i32;
+
+    pub fn kimi_mla_cublaslt_init_cuda() -> i32;
+
+    pub fn kimi_mla_cublaslt_destroy_cuda();
+
     pub fn kimi_int4_expert_metadata_probe_cuda(
         weight_shape: *const i32,
         weight_shape_entries: usize,

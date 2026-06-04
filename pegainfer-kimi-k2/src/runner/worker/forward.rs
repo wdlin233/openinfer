@@ -116,6 +116,8 @@ pub(super) fn forward_decode_batch_next_token_kernels(
         active_len,
         &mut decode_arena.scratch.sampling.top1_value_scratch,
         &mut decode_arena.scratch.sampling.top1_out,
+        &mut decode_arena.scratch.sampling.top1_partial_values,
+        &mut decode_arena.scratch.sampling.top1_partial_indices,
     )
 }
 
@@ -231,12 +233,24 @@ fn forward_mla_decode_layer_into(
         &mut scratch.mla.attn_out,
         local_heads,
     )?;
-    typed_ops::gemm_dm_hs_to_typed_graphsafe(
-        ctx,
-        &attention.o_proj,
-        &scratch.mla.attn_out,
-        &mut scratch.mla.projected,
-    )?;
+    if attention.o_proj.rows == KIMI_K2_HIDDEN
+        && attention.o_proj.cols == KIMI_O_PROJ_CUBLASLT_INPUT
+        && kimi_o_proj_cublaslt_supports_batch_size(scratch.mla.attn_out.seq_len)
+    {
+        kimi_o_proj_cublaslt_into(
+            ctx,
+            &attention.o_proj,
+            &scratch.mla.attn_out,
+            &mut scratch.mla.projected,
+        )?;
+    } else {
+        typed_ops::gemm_dm_hs_to_typed_graphsafe(
+            ctx,
+            &attention.o_proj,
+            &scratch.mla.attn_out,
+            &mut scratch.mla.projected,
+        )?;
+    }
     Ok(())
 }
 
