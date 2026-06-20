@@ -21,6 +21,9 @@ use openinfer_core::engine::{EngineHandle, EngineLoadOptions, EpBackend, ModelIn
 
 pub use kernel_plan::kernel_plan;
 pub use scheduler::DEFAULT_MAX_PREFILL_TOKENS;
+pub use weights::{
+    DEFAULT_GPU_MEMORY_UTILIZATION, DEFAULT_KV_CACHE_MEMORY_MARGIN_BYTES, Qwen3MemoryOptions,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen3LoraOptions {
@@ -156,6 +159,7 @@ pub struct Qwen3LaunchOptions {
     pub offload: Qwen3OffloadOptions,
     pub no_prefix_cache: bool,
     pub max_prefill_tokens: usize,
+    pub memory: Qwen3MemoryOptions,
     /// `Some` switches on LoRA serving (and disables CUDA Graph).
     pub lora: Option<Qwen3LoraOptions>,
 }
@@ -205,6 +209,7 @@ pub fn launch(model_path: &Path, options: Qwen3LaunchOptions) -> Result<EngineHa
                 options.offload,
                 options.no_prefix_cache,
                 options.max_prefill_tokens,
+                options.memory,
             )
         }
         None => start_engine_with_offload(
@@ -213,6 +218,7 @@ pub fn launch(model_path: &Path, options: Qwen3LaunchOptions) -> Result<EngineHa
             options.offload,
             options.no_prefix_cache,
             options.max_prefill_tokens,
+            options.memory,
         ),
     }
 }
@@ -224,6 +230,7 @@ pub fn start_engine(model_path: &Path, options: EngineLoadOptions) -> Result<Eng
         Qwen3OffloadOptions::disabled(),
         false,
         DEFAULT_MAX_PREFILL_TOKENS,
+        Qwen3MemoryOptions::default(),
     )
 }
 
@@ -245,6 +252,7 @@ pub fn start_engine_with_offload(
     offload_options: Qwen3OffloadOptions,
     no_prefix_cache: bool,
     max_prefill_tokens: usize,
+    memory_options: Qwen3MemoryOptions,
 ) -> Result<EngineHandle> {
     let EngineLoadOptions {
         enable_cuda_graph,
@@ -263,6 +271,7 @@ pub fn start_engine_with_offload(
         offload_options,
         no_prefix_cache,
         max_prefill_tokens,
+        memory_options,
     )
 }
 
@@ -273,6 +282,7 @@ pub fn start_engine_with_lora_control(
     offload_options: Qwen3OffloadOptions,
     no_prefix_cache: bool,
     max_prefill_tokens: usize,
+    memory_options: Qwen3MemoryOptions,
 ) -> Result<EngineHandle> {
     let EngineLoadOptions {
         enable_cuda_graph,
@@ -292,5 +302,6 @@ pub fn start_engine_with_lora_control(
         offload_options,
         no_prefix_cache,
         max_prefill_tokens,
+        memory_options,
     )
 }

@@ -19,6 +19,7 @@ use rand::rngs::StdRng;
 use tokio::sync::mpsc;
 
 use crate::executor::{ModelExecutor, Qwen3Executor, RequestId};
+use crate::weights::Qwen3MemoryOptions;
 use crate::{Qwen3LoraOptions, Qwen3OffloadOptions};
 use openinfer_core::engine::{
     EngineCommand, EngineControlRequest, EngineHandle, GenerateRequest, KvCapacity, TokenEvent,
@@ -141,6 +142,7 @@ pub(crate) fn start_qwen3(
     offload_options: Qwen3OffloadOptions,
     no_prefix_cache: bool,
     max_prefill_tokens: usize,
+    memory_options: Qwen3MemoryOptions,
 ) -> Result<EngineHandle> {
     let mut executor = Qwen3Executor::from_runtime_with_lora_options(
         model_path,
@@ -148,6 +150,8 @@ pub(crate) fn start_qwen3(
         device_ordinals,
         Qwen3LoraOptions::default(),
         offload_options,
+        max_prefill_tokens,
+        memory_options,
     )?;
     executor.set_no_prefix_cache(no_prefix_cache);
     Ok(start_with_executor(executor, seed, max_prefill_tokens))
@@ -162,6 +166,7 @@ pub(crate) fn start_qwen3_with_lora_control(
     offload_options: Qwen3OffloadOptions,
     no_prefix_cache: bool,
     max_prefill_tokens: usize,
+    memory_options: Qwen3MemoryOptions,
 ) -> Result<EngineHandle> {
     let mut executor = Qwen3Executor::from_runtime_with_lora_options(
         model_path,
@@ -169,6 +174,8 @@ pub(crate) fn start_qwen3_with_lora_control(
         device_ordinals,
         lora_options,
         offload_options,
+        max_prefill_tokens,
+        memory_options,
     )?;
     executor.set_no_prefix_cache(no_prefix_cache);
     Ok(start_with_executor_with_lora_control(
