@@ -753,7 +753,7 @@ impl Qwen3Executor {
             .min()
             .expect("at least one TP rank");
         log::info!(
-            "Qwen3 TP KV budget: using {} blocks (minimum across {} ranks)",
+            "TP KV budget: using {} blocks (minimum across {} ranks)",
             budget.num_blocks,
             world_size
         );

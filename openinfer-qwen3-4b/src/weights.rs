@@ -876,7 +876,8 @@ impl Qwen3Model {
         Ok(())
     }
 
-    /// KV cache geometry and budget for the executor to create a KvCacheManager.
+    /// KV cache geometry and budget for kernel-call tracing.
+    #[cfg(feature = "kernel-call-trace")]
     pub(crate) fn kv_budget(&self) -> KvBudget {
         let geometry = self.kv_budget_geometry();
         let bytes_per_block = self.kv_bytes_per_block(&geometry);
@@ -995,7 +996,7 @@ impl Qwen3Model {
             min_kv_bytes / (1024 * 1024)
         );
         log::info!(
-            "Qwen3 memory profile: total={} MiB requested={} MiB ({:.0}%) initial_used={} MiB \
+            "memory profile: total={} MiB requested={} MiB ({:.0}%) initial_used={} MiB \
              peak_non_kv_increase={} MiB margin={} MiB -> KV budget={} MiB",
             total_bytes / (1024 * 1024),
             requested_bytes / (1024 * 1024),
